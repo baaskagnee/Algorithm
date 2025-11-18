@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>UB Routing (BFS / DFS / Dijkstra)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html,body,#map{height:100%;margin:0}
+    .panel{position:absolute;top:10px;left:10px;z-index:1000;background:#fff;padding:10px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.2);width:360px;font:14px system-ui}
+    .panel input,.panel select,.panel button{width:100%;margin:6px 0;padding:8px}
+    .row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="panel">
+  <b>UB Routing</b>
+  <label>Start (lat,lng)</label>
+  <input id="start" value="47.9205, 106.9176">
+  <label>End (lat,lng)</label>
+  <input id="end" value="47.9181, 106.9251">
+  <label>Algorithm</label>
+  <select id="algo">
+    <option value="dijkstra">Shortest (Dijkstra)</option>
+    <option value="bfs">Fewest hops (BFS)</option>
+    <option value="dfs">All paths (DFS, limited)</option>
+  </select>
+  <div class="row">
+    <input id="dfs_paths" placeholder="max_paths">
+    <input id="dfs_hops"  placeholder="max_hops">
+    <input id="dfs_dist"  placeholder="max_dist_km">
+  </div>
+  <button id="go">Compute</button>
+  <button id="export">Export GeoJSON (DFS)</button>
+  <div id="msg" style="margin-top:6px;color:#333;"></div>
+  <div id="stats" style="margin-top:4px;color:#666;font-size:12px;"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const API="http://127.0.0.1:8000";
+
+const map=L.map('map').setView([47.918,106.917],13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OSM'}).addTo(map);
+const routeLayer=L.geoJSON(null,{style:{weight:5}}).addTo(map);
+const sMark=L.marker([47.9205,106.9176],{draggable:true}).addTo(map);
+const tMark=L.marker([47.9181,106.9251],{draggable:true}).addTo(map);
+
+sMark.on('dragend',()=>{const p=sMark.getLatLng();document.getElementById('start').value=`${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`});
+tMark.on('dragend',()=>{const p=tMark.getLatLng();document.getElementById('end').value=`${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`});
+
+// EPSG:3857 -> [lon,lat] (GeoJSON)
+function toLngLat(c){const R=6378137.0;const lon=c[0]*180/(Math.PI*R);const lat=Math.atan(Math.sinh(c[1]/R))*180/Math.PI;return [lon,lat]}
+function convert3857(gj){
+  if(!gj) return gj;
+  if(gj.type==="FeatureCollection"){gj.features=gj.features.map(f=>convert3857(f));return gj}
+  if(gj.type==="Feature"){if(gj.geometry) gj.geometry=convert3857(gj.geometry);return gj}
+  if(gj.type==="LineString"){gj.coordinates=gj.coordinates.map(toLngLat);return gj}
+  if(gj.type==="MultiLineString"){gj.coordinates=gj.coordinates.map(line=>line.map(toLngLat));return gj}
+  return gj;
+}
+function parseLatLng(s){const p=s.split(',').map(x=>parseFloat(x.trim()));if(p.length!==2||p.some(isNaN))return null;return{lat:p[0],lng:p[1]}}
+function show(m){document.getElementById('msg').innerText=m}
+
+const COLORS=['#007bff','#e83e8c','#28a745','#fd7e14','#6f42c1','#17a2b8','#ffc107','#20c997','#343a40','#ff5252','#7b1fa2','#009688'];
+
+document.getElementById('go').onclick=async()=>{
+  routeLayer.clearLayers();
+  const algo=document.getElementById('algo').value;
+  const s=parseLatLng(document.getElementById('start').value)||sMark.getLatLng();
+  const t=parseLatLng(document.getElementById('end').value)||tMark.getLatLng();
+
+  try{
+    let url,method='GET',body=null;
+    if(algo==='dijkstra'){
+      url=`${API}/route/shortest?start_lat=${s.lat}&start_lng=${s.lng}&end_lat=${t.lat}&end_lng=${t.lng}`;
+    }else if(algo==='bfs'){
+      url=`${API}/route/fewest_hops?start_lat=${s.lat}&start_lng=${s.lng}&end_lat=${t.lat}&end_lng=${t.lng}`;
+    }else{
+      const mpaths=parseInt((document.getElementById('dfs_paths')?.value||'300'),10);
+      const mhops=parseInt((document.getElementById('dfs_hops')?.value||'120'),10);
+      const mdist=parseFloat((document.getElementById('dfs_dist')?.value||'100'));
+      url=`${API}/route/all`; method='POST';
+      body=JSON.stringify({start_lat:s.lat,start_lng:s.lng,end_lat:t.lat,end_lng:t.lng,max_paths:mpaths,max_hops:mhops,max_distance_km:mdist});
+    }
+
+    const res=await fetch(url,{method,headers:body?{'Content-Type':'application/json'}:undefined,body});
+    if(!res.ok) throw new Error(await res.text());
+    const gj3857=await res.json(); const gj4326=convert3857(gj3857);
+
+    if(algo!=='dfs'){
+      routeLayer.addData(gj4326);
+      const b=routeLayer.getBounds(); if(b.isValid()) map.fitBounds(b,{padding:[20,20]});
+      const props=(gj4326.features?.[0]?.properties)||{};
+      if(algo==='dijkstra') show(`Dijkstra | cost=${(+props.cost).toFixed?.(1) ?? props.cost} (${props.metric||'distance'})`)
+      else show(`BFS | hops=${props.hops}`);
+      document.getElementById('stats').innerText=''; document.getElementById('export').disabled=true;
+      return;
+    }
+
+    // DFS: олон өнгөөр
+    let i=0;
+    const styled=L.geoJSON(gj4326,{style:(_)=>({color:COLORS[i++%COLORS.length],weight:4,opacity:.9}),
+      onEachFeature:(f,layer)=>{
+        const cost=f.properties?.cost; const idx=i;
+        layer.bindTooltip(`#${idx} • cost≈${(typeof cost==='number'?cost.toFixed(1):'?')}`,{sticky:true})
+      }}).addTo(map);
+    const b=styled.getBounds(); if(b.isValid()) map.fitBounds(b,{padding:[24,24]});
+    const n=gj4326.features?.length??0; show(`DFS | ${n} paths`)
+    document.getElementById('stats').innerText=`Paths drawn with ${COLORS.length}-color palette`; document.getElementById('export').disabled=(n===0);
+  }catch(e){ show(e.message||'Error') }
+};
+
+document.getElementById('export').onclick=()=>{
+  const feats=[]; routeLayer.eachLayer(l=>{if(l.toGeoJSON) feats.push(l.toGeoJSON())});
+  if(!feats.length){alert('Nothing to export (run DFS first).');return}
+  const fc={type:'FeatureCollection',features:feats}; const blob=new Blob([JSON.stringify(fc)],{type:'application/geo+json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='dfs_paths.geojson'; a.click();
+};
+</script>
+</body>
+</html>

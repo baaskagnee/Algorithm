@@ -1,0 +1,99 @@
+@startuml Components
+title UB Routing - Backend components
+actor Client
+database "Shapefile (EPSG:3857)" as Shapefile
+component "FastAPI app\n(app.py)" as App
+component "RoadGraph\n(nodes, edges)" as RoadGraph
+component "Algorithms\n(Dijkstra / BFS / DFS)" as Algos
+artifact "GeoJSON\nFeatureCollection" as GeoJSON
+
+Client --> App : HTTP requests (GET/POST)
+App --> RoadGraph : nearest_node() / snap()
+App --> Algos : request algorithm (Dijkstra / BFS / DFS)
+Algos --> RoadGraph : read edges / nodes
+RoadGraph --> Shapefile : loaded at startup (load_shapefile)
+Algos --> App : path nodes / cost
+App --> GeoJSON : path_to_linestring() -> feature() -> feature_collection()
+App --> Client : 200 OK (GeoJSON FeatureCollection)
+
+note right of RoadGraph
+	stores:
+	- nodes: np.ndarray (N,2)
+	- edges: dict[u] -> list[(v, weight, eid)]
+	- geom_by_edge: eid -> LineString
+end note
+
+@enduml
+
+@startuml RouteShortestSequence
+title Sequence: /route/shortest (Dijkstra)
+actor Client
+participant App as "FastAPI app\n/route/shortest"
+participant Snap as "snap()"
+participant RG as "RoadGraph"
+participant D as "dijkstra()"
+participant Utils as "path_to_linestring / feature"
+
+Client -> App: GET /route/shortest?start_lat&start_lng&end_lat&end_lng
+App -> Snap: snap(start_lat,start_lng)
+Snap -> Utils: lonlat_to_3857(lon,lat)
+Snap -> RG: nearest_node(x,y)
+RG --> Snap: node id (s)
+App -> Snap: snap(end_lat,end_lng)
+Snap -> RG: nearest_node(x,y)
+RG --> Snap: node id (t)
+App -> D: dijkstra(s,t)
+D -> RG: iterate edges (GRAPH.edges)
+RG --> D: path node list
+D --> App: path, cost
+App -> Utils: path_to_linestring(path)
+Utils --> App: LineString
+App -> Utils: feature(LineString, props)
+Utils --> App: Feature
+App -> Client: FeatureCollection (GeoJSON)
+
+@enduml
+
+@startuml RouteAllSequence
+title Sequence: /route/all (DFS - all simple paths)
+actor Client
+participant ClientAPI as "Client (POST)"
+participant App as "FastAPI app\n/route/all"
+participant Req as "AllPathsRequest"
+participant Snap as "snap()"
+participant DFS as "dfs_all_simple_paths()"
+participant Utils as "path_to_linestring / feature"
+
+ClientAPI -> App: POST /route/all {JSON body}
+App -> Req: validate body (Pydantic AllPathsRequest)
+App -> Snap: snap(req.start_lat, req.start_lng)
+Snap -> RG: nearest_node(x,y)
+RG --> Snap: node id (s)
+App -> Snap: snap(req.end_lat, req.end_lng)
+Snap -> RG: nearest_node(x,y)
+RG --> Snap: node id (t)
+App -> DFS: dfs_all_simple_paths(s,t, max_paths, max_hops, max_cost)
+DFS -> RG: traverse edges recursively
+RG --> DFS: discovered paths (list of node lists)
+DFS --> App: paths
+App -> Utils: for each path -> path_to_linestring()
+Utils --> App: LineString
+App -> Utils: feature(LineString, props)
+App -> ClientAPI: FeatureCollection (GeoJSON)
+
+@enduml
+
+@startuml Startup
+title Startup flow: graph loading
+participant Process as "Python process"
+participant RG as "RoadGraph (GRAPH)"
+participant Shapefile as "Shapefile on disk"
+
+Process -> RG: GRAPH = RoadGraph(metric)
+RG -> Shapefile: gpd.read_file(SHAPEFILE_PATH)
+Shapefile --> RG: GeoDataFrame (rows of LineString geometries)
+RG -> RG: build nodes & edges
+note right: This can be time & memory intensive
+RG -> Process: GRAPH ready (nodes, edges populated)
+
+@enduml
